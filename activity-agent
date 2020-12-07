@@ -1,0 +1,218 @@
+#! /opt/local/bin/python3
+#
+#
+
+import Quartz
+import argparse
+import datetime
+import os
+import sys
+
+ME = 'activity-agent'
+MIN_DT = 240  # require MIN_DT seconds before a timestamp is considered missing
+MIN_BREAK = 15*60  # ignore locked screen for less than MIN_BREAK seconds
+LOG_DN = os.path.expanduser(f'~/.{ME}/logs/')
+LOG_FN = f'{ME}-%Y-%m-%d.log'
+DT_FMT = '%a %b %d %Y %H:%M:%S %Z'
+PLIST = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>activity-agent</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>bash</string>
+        <string>-c</string>
+        <string>"{os.path.abspath(sys.argv[0])}" writelog</string>
+    </array>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StartInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>
+'''
+
+
+def install():
+    spfn = f'{ME}.plist'
+    pfn = os.path.expanduser(f'~/Library/LaunchAgents/{spfn}')
+    open(pfn, 'w').write(PLIST)
+
+    cmd = f'launchctl load {pfn}'
+    print(cmd)
+    os.system(cmd)
+
+
+def uninstall():
+    spfn = f'{ME}.plist'
+    pfn = os.path.expanduser(f'~/Library/LaunchAgents/{spfn}')
+
+    cmd = f'launchctl unload {pfn}'
+    print(cmd)
+    os.system(cmd)
+
+    if os.path.isfile(pfn):
+        os.unlink(pfn)
+
+
+def getState():
+    try:
+        d = Quartz.CGSessionCopyCurrentDictionary()
+    except:
+        d = None
+
+    if not d:
+        status = 'Unknown'
+    elif d.get("CGSSessionScreenIsLocked", 0) == 0:
+        status = 'Active'
+    elif d.get("kCGSSessionOnConsoleKey", 0) == 1:
+        status = 'Locked'
+    else:
+        status = 'Unknown'
+
+    return status
+
+
+def writeLog():
+    if not os.path.isdir(LOG_DN):
+        os.makedirs(LOG_DN)
+    now = datetime.datetime.now().astimezone()
+    fn = os.path.join(LOG_DN, now.strftime(LOG_FN))
+
+    state = getState()
+    dt = now.strftime(DT_FMT)
+    log = '%s - %s' % (dt, state)
+
+    open(fn, 'a').write(log+'\n')
+
+
+def timeDiff(dt1, dt2):
+    '''Number of seconds from dt1 to dt2'''
+    return (dt2 - dt1).total_seconds()
+
+
+def readLog(lfn):
+    tmp = []
+    with open(lfn) as fd:
+        for line in fd:
+            line = line.strip()
+            sp = line.split(' - ')
+            if not line or len(sp) != 2:
+                continue
+            dt, state = sp
+            dt = datetime.datetime.strptime(dt, DT_FMT)
+            tmp.append((dt, dt, state))
+
+    if not tmp:
+        return []
+
+    # Ensure that we are consistent around midnight
+    midnight = tmp[0][0].replace(hour=0, minute=0, second=0)
+    state = tmp[0][-1] if timeDiff(midnight, tmp[0][0]) <= MIN_DT else 'Off'
+    tmp.insert(0, (midnight, midnight, state))
+
+    midnight2 = tmp[-1][1].replace(hour=23, minute=59, second=59)
+    state = tmp[-1][-1] if timeDiff(tmp[-1][1], midnight2) <= MIN_DT else 'Off'
+    if midnight2 < datetime.datetime.now() and tmp[-1][1] < midnight2:
+        tmp.append((midnight2, midnight2, state))
+
+    return tmp
+
+
+def cleanLogLines(loglines):
+    # Put off in log file when we have no logs for a long time
+    lls = [loglines[0]]
+    tmp = list(reversed(loglines))
+    while tmp:
+        lstart, lend, lstate = lls[-1]
+        start, end, state = line = tmp.pop()
+
+        if timeDiff(lend, start) > MIN_DT:
+            # Add 'Off' log entry
+            tmp.append(line)
+            tmp.append((lend, start, 'Off'))
+            continue
+
+        if lstate == state:
+            # Same state as before
+            lls[-1] = (lstart, end, state)
+            continue
+        else:
+            # New state
+            lls[-1] = (lstart, start, lstate)
+            lls.append(line)
+
+    # remove short breaks
+    i = 1
+    while i < len(lls) - 1:
+        prev, cur, next = lls[i-1:i+2]
+        if prev[-1] == 'Active' \
+                or cur[-1] != 'Active' \
+                or next[-1] == 'Active':
+            # we have a break between active sessions
+            s = timeDiff(prev[1], next[0])
+            if s < MIN_BREAK:
+                # print('Deleting', lls[i:i+2])
+                del lls[i:i+2]
+                lls[i-1] = (prev[0], next[1], prev[2])
+                continue
+        i += 1
+
+    return lls
+
+
+def printLogLines(logLines):
+    if not logLines:
+        return
+
+    lastDay = logLines[0][0].date()
+    for line in logLines:
+        start, end, state = line
+        if start.date() != lastDay and start.hour >= 6:
+            lastDay = start.date()
+            print()
+        # s = timeDiff(start, end)
+        print(start.strftime(DT_FMT), '-', state)
+
+
+def showLog():
+    # go at most 14 days back
+    fns = sorted(os.listdir(LOG_DN))
+    del fns[:-14]
+
+    lls = []
+    for fn in fns:
+        lfn = os.path.join(LOG_DN, fn)
+        lls.extend(readLog(lfn))
+
+    lls = cleanLogLines(lls)
+    printLogLines(lls)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    # parser.add_argument("-v", "--verbose", action="store_true")
+    # parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("COMMAND", help="writelog")
+    args = parser.parse_args()
+
+    command = args.COMMAND.upper()
+    if command == 'WRITELOG':
+        writeLog()
+    elif command == 'LOGS' or not command:
+        showLog()
+    elif command == 'INSTALL':
+        install()
+    elif command in ['UNINSTALL', 'REMOVE']:
+        uninstall()
+    else:
+        print(f'Unknown command: {command:r}')
+
+
+main()
