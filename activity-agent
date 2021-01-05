@@ -207,6 +207,9 @@ def main():
         writeLog()
     elif command == 'LOGS' or not command:
         showLog()
+    elif command == 'REINSTALL':
+        uninstall()
+        install()
     elif command == 'INSTALL':
         install()
     elif command in ['UNINSTALL', 'REMOVE']:
