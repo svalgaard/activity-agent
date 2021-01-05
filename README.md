@@ -16,7 +16,7 @@ If you use the default Apple Python 3.x, you can install pyobjc using this comma
 
 If you are using MacPorts, pyobjc can be installed using this command:
 ```
-port install py38-pyobjc
+sudo port install py38-pyobjc
 ````
 
 Installation
@@ -31,7 +31,7 @@ This asks launchctl to run activity-monitor once every 60 seconds.
 Check that log files start to appear in `~/.activity-monitor` within the
 next minute.
 
-To uninstall, run `activity-monitor uninstall`.
+To uninstall, run `./activity-monitor uninstall`.
 
 
 Get logs
