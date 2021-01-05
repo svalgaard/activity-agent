@@ -7,9 +7,17 @@ Look no further
 Requirements
 ------------
 
-* Python 3.6+
-* The pyobjc package. Using macports this can be installed using
-  `port require py38-pyobjc` if not already available.
+Python 3.6+ and the pyobjc package.
+
+If you use the default Apple Python 3.x, you can install pyobjc using this command:
+```
+/usr/bin/python3 -m pip install --user pyobjc
+```
+
+If you are using MacPorts, pyobjc can be installed using this command:
+```
+port install py38-pyobjc
+````
 
 Installation
 ------------
