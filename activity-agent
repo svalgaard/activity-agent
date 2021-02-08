@@ -191,10 +191,13 @@ def printLogLines(logLines):
         print(start.strftime(DT_FMT), '-', state)
 
 
-def showLog():
+def showLog(days):
+    if not os.path.isdir(LOG_DN):
+        return
+
     # go at most 14 days back
     fns = sorted(os.listdir(LOG_DN))
-    del fns[:-14]
+    del fns[:-days]
 
     lls = []
     for fn in fns:
@@ -214,6 +217,10 @@ def main():
                         dest='logdn',
                         default=LOG_DN,
                         help=f'location of log directory. Default: {LOG_DN}')
+    parser.add_argument("-d", "--days", metavar='DAYS',
+                        dest='days', type=int,
+                        default=14,
+                        help='look at logs at most DAYS days old. Default: 14')
     # parser.add_argument("-v", "--verbose", action="store_true")
     # parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("COMMAND", help="writelog")
@@ -224,8 +231,8 @@ def main():
     if command == 'WRITELOG':
         writeLog()
     elif command == 'LOGS' or not command:
-        showLog()
     elif command == 'REINSTALL':
+        showLog(args.days)
         uninstall()
         install()
     elif command == 'INSTALL':
