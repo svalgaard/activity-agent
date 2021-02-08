@@ -19,6 +19,17 @@ If you are using MacPorts, pyobjc can be installed using this command:
 sudo port install py38-pyobjc
 ````
 
+If pyobjc has not been installed, you get an error about
+a missing Quartz import:
+
+```
+./activity-agent install
+Traceback (most recent call last):
+  File "./activity-agent", line 5, in <module>
+    import Quartz  # Please install pyobjc
+ModuleNotFoundError: No module named 'Quartz'
+```
+
 Installation
 ------------
 

@@ -2,7 +2,7 @@
 #
 #
 
-import Quartz
+import Quartz  # Please install pyobjc
 import argparse
 import datetime
 import os
