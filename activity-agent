@@ -6,6 +6,7 @@ import Quartz
 import argparse
 import datetime
 import os
+import socket
 import sys
 
 ME = 'activity-agent'
@@ -37,6 +38,15 @@ PLIST = f'''<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>
 '''
+
+
+def setupLogDir():
+    global LOG_DN
+
+    hostname = socket.gethostname()
+    hostname = hostname.split('.')[0]
+    if hostname:
+        LOG_DN = os.path.expanduser(f'~/.{ME}/logs-{hostname}/')
 
 
 def install():
@@ -196,11 +206,19 @@ def showLog():
 
 
 def main():
+    global LOG_DN
+    setupLogDir()
+
     parser = argparse.ArgumentParser()
+    parser.add_argument("-l", "--log-dir", metavar='DIR',
+                        dest='logdn',
+                        default=LOG_DN,
+                        help=f'location of log directory. Default: {LOG_DN}')
     # parser.add_argument("-v", "--verbose", action="store_true")
     # parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("COMMAND", help="writelog")
     args = parser.parse_args()
+    LOG_DN = args.logdn
 
     command = args.COMMAND.upper()
     if command == 'WRITELOG':
