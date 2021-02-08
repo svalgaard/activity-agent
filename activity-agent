@@ -222,25 +222,31 @@ def main():
                         default=14,
                         help='look at logs at most DAYS days old. Default: 14')
     # parser.add_argument("-v", "--verbose", action="store_true")
-    # parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("COMMAND", help="writelog")
+    parser.add_argument("COMMAND", help="writelog", choices=[
+        'writelog',
+        'logs',
+        'reinstall',
+        'install',
+        'uninstall',
+        'remove',
+    ])
     args = parser.parse_args()
     LOG_DN = args.logdn
+    command = args.COMMAND
 
-    command = args.COMMAND.upper()
-    if command == 'WRITELOG':
+    if command == 'writelog':
         writeLog()
-    elif command == 'LOGS' or not command:
-    elif command == 'REINSTALL':
+    elif command == 'logs':
         showLog(args.days)
+    elif command == 'reinstall':
         uninstall()
         install()
-    elif command == 'INSTALL':
+    elif command == 'install':
         install()
-    elif command in ['UNINSTALL', 'REMOVE']:
+    elif command in ['uninstall', 'remove']:
         uninstall()
     else:
-        print(f'Unknown command: {command:r}')
+        print(f'Unknown command: {command!r}')
 
 
 main()
