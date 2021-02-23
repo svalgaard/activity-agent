@@ -40,6 +40,19 @@ PLIST = f'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 
+class State:
+    def __init__(self, start, end, state):
+        self.start = start
+        self.end = end
+        self.state = state
+
+    def __repr__(self):
+        return f'<{self.start} {self.end} {self.state}>'
+
+    def __len__(self):
+        return timeDiff(self.start, self.end)
+
+
 def setupLogDir():
     global LOG_DN
 
@@ -104,7 +117,7 @@ def writeLog():
 
 def timeDiff(dt1, dt2):
     '''Number of seconds from dt1 to dt2'''
-    return (dt2 - dt1).total_seconds()
+    return int((dt2 - dt1).total_seconds())
 
 
 def readLog(lfn):
@@ -117,85 +130,132 @@ def readLog(lfn):
                 continue
             dt, state = sp
             dt = datetime.datetime.strptime(dt, DT_FMT)
-            tmp.append((dt, dt, state))
+            tmp.append(State(dt, dt, state))
 
     if not tmp:
         return []
 
-    # Ensure that we are consistent around midnight
-    midnight = tmp[0][0].replace(hour=0, minute=0, second=0)
-    state = tmp[0][-1] if timeDiff(midnight, tmp[0][0]) <= MIN_DT else 'Off'
-    tmp.insert(0, (midnight, midnight, state))
-
-    midnight2 = tmp[-1][1].replace(hour=23, minute=59, second=59)
-    state = tmp[-1][-1] if timeDiff(tmp[-1][1], midnight2) <= MIN_DT else 'Off'
-    if midnight2 < datetime.datetime.now() and tmp[-1][1] < midnight2:
-        tmp.append((midnight2, midnight2, state))
-
     return tmp
 
 
-def cleanLogLines(loglines):
-    # Put off in log file when we have no logs for a long time
-    lls = [loglines[0]]
-    tmp = list(reversed(loglines))
-    while tmp:
-        lstart, lend, lstate = lls[-1]
-        start, end, state = line = tmp.pop()
+def cleanLogLines(loglines, lockedoff):
+    dt = datetime.timedelta(seconds=MIN_DT)
 
-        if timeDiff(lend, start) > MIN_DT:
-            # Add 'Off' log entry
-            tmp.append(line)
-            tmp.append((lend, start, 'Off'))
-            continue
+    # Ensure that we are consistent around midnight
+    first = loglines[0]
+    midnight = first.start.replace(hour=0, minute=0, second=0)
+    if first.start <= midnight + dt:
+        first.start = midnight
+    else:
+        loglines.insert(0, State(midnight, midnight, 'Off'))
 
-        if lstate == state:
-            # Same state as before
-            lls[-1] = (lstart, end, state)
-            continue
+    last = loglines[-1]
+    midnight2 = last.end.replace(hour=23, minute=59, second=59)
+    if midnight2 < datetime.datetime.now():
+        if last.end + dt < midnight2:
+            loglines.append(State(midnight2, midnight2, 'Off'))
         else:
-            # New state
-            lls[-1] = (lstart, start, lstate)
-            lls.append(line)
+            last.end = midnight2
 
-    # remove short breaks
+    # Put Off in log file when we have no logs for a long time
     i = 1
-    while i < len(lls) - 1:
-        prev, cur, next = lls[i-1:i+2]
-        if prev[-1] == 'Active' \
-                or cur[-1] != 'Active' \
-                or next[-1] == 'Active':
-            # we have a break between active sessions
-            s = timeDiff(prev[1], next[0])
-            if s < MIN_BREAK:
-                # print('Deleting', lls[i:i+2])
-                del lls[i:i+2]
-                lls[i-1] = (prev[0], next[1], prev[2])
-                continue
+    while i < len(loglines):
+        expstart = loglines[i-1].end + dt
+        expend = loglines[i].start
+        if expstart < expend:
+            st = State(expstart, expend, 'Off')
+            loglines.insert(i, st)
         i += 1
 
-    return lls
+    # Check that we have no missing holes
+    for i in range(1, len(loglines)):
+        prev, cur = loglines[i-1], loglines[i]
+        assert(timeDiff(prev.end, cur.start) <= MIN_DT)
+
+    # Maybe use Locked/off
+    if not lockedoff:
+        for st in loglines:
+            if st.state.lower() in ['off', 'locked']:
+                st.state = 'Locked/off'
+
+    # Join adjacent same states
+    i = len(loglines) - 1
+    while i >= 1:
+        prev, cur = loglines[i-1], loglines[i]
+        if prev.state == cur.state:
+            prev.end = cur.end
+            del loglines[i]
+        i -= 1
+
+    # Ignore short breaks
+    i = len(loglines) - 1
+    while i >= 2:
+        prev, cur = loglines[i-1], loglines[i]
+        pprev, prev, cur = loglines[i-2], loglines[i-1], loglines[i]
+
+        if pprev.state == cur.state == 'Active' and len(prev) <= MIN_BREAK:
+            # we have a short break between two active sessions
+            del loglines[i-1:i+1]
+            pprev.end = cur.end
+            i -= 2
+        else:
+            i -= 1
+
+    # Ignore short breaks
+    i = len(loglines) - 1
+    while i >= 2:
+        prev, cur = loglines[i-1], loglines[i]
+        pprev, prev, cur = loglines[i-2], loglines[i-1], loglines[i]
+
+        if pprev.state == cur.state and prev.state == 'Active' \
+                and len(prev) <= MIN_BREAK:
+            # we have a short activity burst between two inactive sessions
+            del loglines[i-1:i+1]
+            pprev.end = cur.end
+            i -= 2
+        else:
+            i -= 1
+
+    i = 1
+    while i < len(loglines):
+        prev, cur = loglines[i-1], loglines[i]
+
+        if i >= 2:
+            pprev = loglines[i-2]
+            ss = set([pprev.state, cur.state])
+
+            if ss == ['Active'] and len(prev) < MIN_BREAK:
+                # we have a short break between active sessions
+                cur.start = prev.start
+                del loglines[i-1]
+                i -= 1
+                continue
+
+            # if pprev.state != 'Active' and cur.state !=
+
+        i += 1
+
+    return loglines
 
 
 def printLogLines(logLines):
     if not logLines:
         return
 
-    lastDay = logLines[0][0].date()
-    for line in logLines:
-        start, end, state = line
-        if start.date() != lastDay and start.hour >= 6:
-            lastDay = start.date()
+    lastDay = logLines[0].start.date()
+    for st in logLines:
+        if st.start.date() != lastDay and st.start.hour >= 6:
+            lastDay = st.start.date()
             print()
         # s = timeDiff(start, end)
-        print(start.strftime(DT_FMT), '-', state)
+        print(st.start.strftime(DT_FMT), '-', st.state)
 
 
-def showLog(days):
+def showLog(days, lockedoff):
     if not os.path.isdir(LOG_DN):
         return
 
-    # go at most 14 days back
+    # go at most DAYS days back
     fns = sorted(os.listdir(LOG_DN))
     del fns[:-days]
 
@@ -204,7 +264,7 @@ def showLog(days):
         lfn = os.path.join(LOG_DN, fn)
         lls.extend(readLog(lfn))
 
-    lls = cleanLogLines(lls)
+    lls = cleanLogLines(lls, lockedoff)
     printLogLines(lls)
 
 
@@ -221,6 +281,10 @@ def main():
                         dest='days', type=int,
                         default=14,
                         help='look at logs at most DAYS days old. Default: 14')
+    parser.add_argument("--lockedoff", dest='lockedoff',
+                        action='store_true',
+                        help='when printing logs, distinguish between '
+                        'off and locked state')
     # parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("COMMAND", help="writelog", choices=[
         'writelog',
@@ -237,7 +301,7 @@ def main():
     if command == 'writelog':
         writeLog()
     elif command == 'logs':
-        showLog(args.days)
+        showLog(args.days, args.lockedoff)
     elif command == 'reinstall':
         uninstall()
         install()
