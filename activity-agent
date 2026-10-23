@@ -1,33 +1,153 @@
-#! /usr/bin/python3
-#
-#
+#!/usr/bin/env python3
 
-import Quartz  # Please install pyobjc
 import argparse
 import datetime
+import glob
+import json
 import os
 import socket
+import subprocess
 import sys
+from pathlib import Path
 
-ME = 'activity-agent'
+QUARTZ_OK = True
+try:
+    import Quartz  # Requires pyobjc
+except ModuleNotFoundError:
+    QUARTZ_OK = False
+
+ME = "activity-agent"
 MIN_DT = 240  # require MIN_DT seconds before a timestamp is considered missing
-MIN_BREAK = 15*60  # ignore locked screen for less than MIN_BREAK seconds
-LOG_DN = os.path.expanduser(f'~/.{ME}/logs/')
-LOG_FN = f'{ME}-%Y-%m-%d.log'
-DT_FMT = '%a %b %d %Y %H:%M:%S %Z'
-PLIST = f'''<?xml version="1.0" encoding="UTF-8"?>
+MIN_BREAK = 15 * 60  # ignore locked screen for less than MIN_BREAK seconds
+
+ROOT_LOG_DN = Path.home() / f".{ME}" / "logs"
+LOG_DN = ROOT_LOG_DN
+LOG_FN_FMT = f"{ME}-%Y-%m-%d.log"
+
+NEW_DT_FMT = "%Y-%m-%d %H:%M:%S%z"
+OLD_DT_FMT = "%a %b %d %Y %H:%M:%S %Z"
+OLD_DT_FMT_NO_TZ = "%a %b %d %Y %H:%M:%S"
+
+
+def parse_datetime(dt_str: str) -> datetime.datetime:
+    """Parses timestamps using the new ISO format, falling back to legacy formats."""
+    dt = None
+
+    # 1. Try new ISO format with explicit offset
+    try:
+        dt = datetime.datetime.strptime(dt_str, NEW_DT_FMT)
+    except ValueError:
+        pass
+
+    # 2. Try Python built-in ISO parser
+    if dt is None:
+        try:
+            dt = datetime.datetime.fromisoformat(dt_str)
+        except ValueError:
+            pass
+
+    # 3. Try original full legacy format
+    if dt is None:
+        try:
+            dt = datetime.datetime.strptime(dt_str, OLD_DT_FMT)
+        except ValueError:
+            pass
+
+    # 4. Fallback for legacy format if %Z causes strptime failure
+    if dt is None:
+        parts = dt_str.split()
+        if len(parts) >= 5:
+            dt_no_tz = " ".join(parts[:5])
+            try:
+                dt = datetime.datetime.strptime(dt_no_tz, OLD_DT_FMT_NO_TZ)
+            except ValueError:
+                pass
+
+    if dt is None:
+        raise ValueError(f"Unrecognized datetime format: {dt_str}")
+
+    # Convert offset-naive datetimes to local timezone-aware datetimes
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = dt.astimezone()
+
+    return dt
+
+
+class State:
+    def __init__(self, start: datetime.datetime, end: datetime.datetime, state: str):
+        self.start = start
+        self.end = end
+        self.state = state
+
+    def __str__(self) -> str:
+        return f"{self.start.strftime('%Y-%m-%d %H:%M:%S')} - {self.state}"
+
+    def __repr__(self) -> str:
+        return f"<{self.start} {self.end} {self.state}>"
+
+    def __len__(self) -> int:
+        return timeDiff(self.start, self.end)
+
+    def __lt__(self, other) -> bool:
+        if self.start != other.start:
+            return self.start < other.start
+        if self.end != other.end:
+            return self.end < other.end
+        return self.state < other.state
+
+
+def setupLogDir() -> Path:
+    hostname = socket.gethostname().split(".")[0]
+    if hostname:
+        return Path.home() / f".{ME}" / f"logs-{hostname}"
+    return ROOT_LOG_DN
+
+
+def get_servicepath() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{ME}.plist"
+
+
+def get_uid() -> str:
+    return str(os.getuid())
+
+
+def run_launchctl(load: bool) -> bool:
+    pfn = get_servicepath()
+    uid = get_uid()
+
+    if load:
+        cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(pfn)]
+    else:
+        cmd = ["launchctl", "bootout", f"gui/{uid}/{ME}"]
+
+    print("Executing:", " ".join(cmd))
+    res = subprocess.run(cmd, capture_output=True, text=True)
+
+    if res.returncode != 0:
+        print(f"launchctl failed: {res.stderr.strip()}")
+        return False
+
+    print("OK")
+    return True
+
+
+def build_plist() -> str:
+    script_path = Path(sys.argv[0]).resolve()
+    python_bin = sys.executable
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>activity-agent</string>
+    <string>{ME}</string>
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
     <key>ProgramArguments</key>
     <array>
-        <string>bash</string>
-        <string>-c</string>
-        <string>"{os.path.abspath(sys.argv[0])}" writelog</string>
+        <string>{python_bin}</string>
+        <string>{script_path}</string>
+        <string>writelog</string>
     </array>
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
@@ -37,208 +157,154 @@ PLIST = f'''<?xml version="1.0" encoding="UTF-8"?>
     <integer>60</integer>
 </dict>
 </plist>
-'''
+"""
 
 
-class State:
-    def __init__(self, start, end, state):
-        self.start = start
-        self.end = end
-        self.state = state
+def install() -> bool:
+    pfn = get_servicepath()
+    pfn.parent.mkdir(parents=True, exist_ok=True)
 
-    def __repr__(self):
-        return f'<{self.start} {self.end} {self.state}>'
+    with open(pfn, "w", encoding="utf-8") as f:
+        f.write(build_plist())
 
-    def __len__(self):
-        return timeDiff(self.start, self.end)
+    return run_launchctl(load=True)
 
 
-def setupLogDir():
-    global LOG_DN
+def uninstall() -> bool:
+    pfn = get_servicepath()
 
-    hostname = socket.gethostname()
-    hostname = hostname.split('.')[0]
-    if hostname:
-        LOG_DN = os.path.expanduser(f'~/.{ME}/logs-{hostname}/')
-
-
-def install():
-    spfn = f'{ME}.plist'
-    pfn = os.path.expanduser(f'~/Library/LaunchAgents/{spfn}')
-    open(pfn, 'w').write(PLIST)
-
-    cmd = f'launchctl load {pfn}'
-    print(cmd)
-    os.system(cmd)
+    if pfn.is_file():
+        err = run_launchctl(load=False)
+        pfn.unlink(missing_ok=True)
+        return err
+    else:
+        print(f"File {pfn!r} does not exist. Nothing to uninstall.")
+        return True
 
 
-def uninstall():
-    spfn = f'{ME}.plist'
-    pfn = os.path.expanduser(f'~/Library/LaunchAgents/{spfn}')
+def getState() -> str:
+    if not QUARTZ_OK:
+        return "Unknown"
 
-    cmd = f'launchctl unload {pfn}'
-    print(cmd)
-    os.system(cmd)
-
-    if os.path.isfile(pfn):
-        os.unlink(pfn)
-
-
-def getState():
     try:
         d = Quartz.CGSessionCopyCurrentDictionary()
-    except:
+    except Exception:
         d = None
 
     if not d:
-        status = 'Unknown'
+        status = "Unknown"
     elif d.get("CGSSessionScreenIsLocked", 0) == 0:
-        status = 'Active'
+        status = "Active"
     elif d.get("kCGSSessionOnConsoleKey", 0) == 1:
-        status = 'Locked'
+        status = "Locked"
     else:
-        status = 'Unknown'
+        status = "Unknown"
 
     return status
 
 
-def writeLog():
-    if not os.path.isdir(LOG_DN):
-        os.makedirs(LOG_DN)
+def writeLog(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.datetime.now().astimezone()
-    fn = os.path.join(LOG_DN, now.strftime(LOG_FN))
+    fn = log_dir / now.strftime(LOG_FN_FMT)
 
     state = getState()
-    dt = now.strftime(DT_FMT)
-    log = '%s - %s' % (dt, state)
+    dt = now.strftime(NEW_DT_FMT)
+    log_line = f"{dt} - {state}\n"
 
-    open(fn, 'a').write(log+'\n')
+    with open(fn, "a", encoding="utf-8") as f:
+        f.write(log_line)
 
 
-def timeDiff(dt1, dt2):
-    '''Number of seconds from dt1 to dt2'''
+def timeDiff(dt1: datetime.datetime, dt2: datetime.datetime) -> int:
+    """Number of seconds from dt1 to dt2"""
     return int((dt2 - dt1).total_seconds())
 
 
-def readLog(lfn):
+def readLog(lfn: Path) -> list:
     tmp = []
-    with open(lfn) as fd:
+    if not lfn.is_file():
+        return tmp
+
+    with open(lfn, "r", encoding="utf-8") as fd:
         for line in fd:
             line = line.strip()
-            sp = line.split(' - ')
+            sp = line.split(" - ")
             if not line or len(sp) != 2:
                 continue
-            dt, state = sp
-            dt = datetime.datetime.strptime(dt, DT_FMT)
+            dt_str, state = sp
+            try:
+                dt = parse_datetime(dt_str).replace(second=1)
+            except ValueError:
+                continue
             tmp.append(State(dt, dt, state))
-
-    if not tmp:
-        return []
 
     return tmp
 
 
-def cleanLogLines(loglines, lockedoff):
+def cleanLogLines(loglines: list, lockedoff: bool) -> list:
     dt = datetime.timedelta(seconds=MIN_DT)
 
-    # Ensure that we are consistent around midnight
+    if not loglines:
+        return []
+
+    # Ensure consistency around midnight
     first = loglines[0]
     midnight = first.start.replace(hour=0, minute=0, second=0)
     if first.start <= midnight + dt:
         first.start = midnight
     else:
-        loglines.insert(0, State(midnight, midnight, 'Off'))
+        loglines.insert(0, State(midnight, midnight, "Off"))
 
     last = loglines[-1]
     midnight2 = last.end.replace(hour=23, minute=59, second=59)
-    if midnight2 < datetime.datetime.now():
+    now = datetime.datetime.now().astimezone()
+    if midnight2 < now:
         if last.end + dt < midnight2:
-            loglines.append(State(midnight2, midnight2, 'Off'))
+            loglines.append(State(midnight2, midnight2, "Off"))
         else:
             last.end = midnight2
 
-    # Put Off in log file when we have no logs for a long time
+    # Fill missing log gaps with 'Off'
     i = 1
     while i < len(loglines):
-        expstart = loglines[i-1].end + dt
+        expstart = loglines[i - 1].end + dt
         expend = loglines[i].start
         if expstart < expend:
-            st = State(expstart, expend, 'Off')
+            st = State(expstart, expend, "Off")
             loglines.insert(i, st)
         i += 1
 
-    # Check that we have no missing holes
-    for i in range(1, len(loglines)):
-        prev, cur = loglines[i-1], loglines[i]
-        assert(timeDiff(prev.end, cur.start) <= MIN_DT)
-
-    # Maybe use Locked/off
+    # Standardize Locked vs Off
     if not lockedoff:
         for st in loglines:
-            if st.state.lower() in ['off', 'locked']:
-                st.state = 'Locked/off'
+            if st.state.lower() in ["off", "locked"]:
+                st.state = "Locked/off"
 
-    # Join adjacent same states
+    # Merge consecutive identical states
     i = len(loglines) - 1
     while i >= 1:
-        prev, cur = loglines[i-1], loglines[i]
+        prev, cur = loglines[i - 1], loglines[i]
         if prev.state == cur.state:
             prev.end = cur.end
             del loglines[i]
         i -= 1
 
-    # Ignore short breaks
+    # Merge short inactive breaks between active sessions
     i = len(loglines) - 1
     while i >= 2:
-        prev, cur = loglines[i-1], loglines[i]
-        pprev, prev, cur = loglines[i-2], loglines[i-1], loglines[i]
-
-        if pprev.state == cur.state == 'Active' and len(prev) <= MIN_BREAK:
-            # we have a short break between two active sessions
-            del loglines[i-1:i+1]
+        pprev, prev, cur = loglines[i - 2], loglines[i - 1], loglines[i]
+        if pprev.state == cur.state == "Active" and len(prev) <= MIN_BREAK:
+            del loglines[i - 1 : i + 1]
             pprev.end = cur.end
             i -= 2
         else:
             i -= 1
-
-    # Ignore short breaks
-    i = len(loglines) - 1
-    while i >= 2:
-        prev, cur = loglines[i-1], loglines[i]
-        pprev, prev, cur = loglines[i-2], loglines[i-1], loglines[i]
-
-        if pprev.state == cur.state and prev.state == 'Active' \
-                and len(prev) <= MIN_BREAK:
-            # we have a short activity burst between two inactive sessions
-            del loglines[i-1:i+1]
-            pprev.end = cur.end
-            i -= 2
-        else:
-            i -= 1
-
-    i = 1
-    while i < len(loglines):
-        prev, cur = loglines[i-1], loglines[i]
-
-        if i >= 2:
-            pprev = loglines[i-2]
-            ss = set([pprev.state, cur.state])
-
-            if ss == ['Active'] and len(prev) < MIN_BREAK:
-                # we have a short break between active sessions
-                cur.start = prev.start
-                del loglines[i-1]
-                i -= 1
-                continue
-
-            # if pprev.state != 'Active' and cur.state !=
-
-        i += 1
 
     return loglines
 
 
-def printLogLines(logLines):
+def printLogLines(logLines: list) -> None:
     if not logLines:
         return
 
@@ -247,70 +313,134 @@ def printLogLines(logLines):
         if st.start.date() != lastDay and st.start.hour >= 6:
             lastDay = st.start.date()
             print()
-        # s = timeDiff(start, end)
-        print(st.start.strftime(DT_FMT), '-', st.state)
+        print(str(st))
 
 
-def showLog(days, lockedoff):
-    if not os.path.isdir(LOG_DN):
-        return
+def printLogLinesAsJSON(logLines: list) -> None:
+    js = {}
+    for log in logLines:
+        YMD = str(log.start.date())
+        js.setdefault(YMD, []).append(str(log))
+    print(json.dumps(js, indent=2))
 
-    # go at most DAYS days back
-    fns = sorted(os.listdir(LOG_DN))
-    del fns[:-days]
+
+def showLog(
+    days: int, lockedoff: bool, all_logs: bool, as_json: bool, log_dir: Path
+) -> None:
+    if all_logs:
+        gl = str(ROOT_LOG_DN.parent / f"logs-*/*.log")
+    else:
+        gl = str(log_dir / "*.log")
+
+    start = datetime.datetime.now().astimezone() - datetime.timedelta(days=days)
+    start_fn = start.strftime(LOG_FN_FMT)
+
+    fns = []
+    for fn in sorted(glob.glob(gl)):
+        sfn = os.path.basename(fn)
+        if sfn < start_fn:
+            continue
+        fns.append(Path(fn))
 
     lls = []
     for fn in fns:
-        lfn = os.path.join(LOG_DN, fn)
-        lls.extend(readLog(lfn))
+        lls.extend(readLog(fn))
 
-    lls = cleanLogLines(lls, lockedoff)
-    printLogLines(lls)
+    ll2 = []
+    for ll in sorted(lls):
+        if ll2:
+            last = ll2[-1]
+            if last.start == ll.start:
+                if last.state == ll.state:
+                    continue
+                elif last.state == "Active":
+                    continue
+                elif ll.state == "Active":
+                    del ll2[-1]
+                else:
+                    print(f"Mismatch error between {last} and {ll}")
+                    sys.exit(1)
+        ll2.append(ll)
+
+    lls = cleanLogLines(ll2, lockedoff)
+    if as_json:
+        printLogLinesAsJSON(lls)
+    else:
+        printLogLines(lls)
 
 
 def main():
-    global LOG_DN
-    setupLogDir()
+    default_log_dir = setupLogDir()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--log-dir", metavar='DIR',
-                        dest='logdn',
-                        default=LOG_DN,
-                        help=f'location of log directory. Default: {LOG_DN}')
-    parser.add_argument("-d", "--days", metavar='DAYS',
-                        dest='days', type=int,
-                        default=14,
-                        help='look at logs at most DAYS days old. Default: 14')
-    parser.add_argument("--lockedoff", dest='lockedoff',
-                        action='store_true',
-                        help='when printing logs, distinguish between '
-                        'off and locked state')
-    # parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("COMMAND", help="writelog", choices=[
-        'writelog',
-        'logs',
-        'reinstall',
-        'install',
-        'uninstall',
-        'remove',
-    ])
+    parser = argparse.ArgumentParser(description="Activity Agent for macOS")
+    parser.add_argument(
+        "-na",
+        "--not-all",
+        dest="use_all_logs",
+        default=True,
+        action="store_false",
+        help="Do NOT use all available log files - only use for current client.",
+    )
+    parser.add_argument(
+        "-l",
+        "--log-dir",
+        metavar="DIR",
+        dest="logdn",
+        type=Path,
+        default=default_log_dir,
+        help=f"Location of log directory. Default: {default_log_dir}",
+    )
+    parser.add_argument(
+        "-d",
+        "--days",
+        metavar="DAYS",
+        dest="days",
+        type=int,
+        default=14,
+        help="Look at logs at most DAYS days old. Default: 14",
+    )
+    parser.add_argument(
+        "-j",
+        "--json",
+        dest="json",
+        action="store_true",
+        help="Output data as machine readable JSON",
+    )
+    parser.add_argument(
+        "--lockedoff",
+        dest="lockedoff",
+        action="store_true",
+        help="Distinguish between off and locked state",
+    )
+    parser.add_argument(
+        "COMMAND",
+        help="Command to run",
+        choices=["writelog", "logs", "reinstall", "install", "uninstall", "remove"],
+    )
     args = parser.parse_args()
-    LOG_DN = args.logdn
+    log_dir = args.logdn
     command = args.COMMAND
 
-    if command == 'writelog':
-        writeLog()
-    elif command == 'logs':
-        showLog(args.days, args.lockedoff)
-    elif command == 'reinstall':
+    if command not in ["logs"]:
+        if not QUARTZ_OK:
+            print("Please install pyobjc to use the Quartz module:")
+            print(f"{sys.executable} -m pip install --user pyobjc")
+            print(f"port install py{sys.version_info[0]}{sys.version_info[1]}-pyobjc")
+            print("brew install pyobjc")
+            sys.exit(1)
+
+    if command == "writelog":
+        writeLog(log_dir)
+    elif command == "logs":
+        showLog(args.days, args.lockedoff, args.use_all_logs, args.json, log_dir)
+    elif command == "reinstall":
         uninstall()
         install()
-    elif command == 'install':
+    elif command == "install":
         install()
-    elif command in ['uninstall', 'remove']:
+    elif command in ["uninstall", "remove"]:
         uninstall()
-    else:
-        print(f'Unknown command: {command!r}')
 
 
-main()
+if __name__ == "__main__":
+    main()

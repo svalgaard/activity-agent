@@ -9,47 +9,41 @@ Requirements
 
 Python 3.6+ and the pyobjc package.
 
-If you use the default Apple Python 3.x, you can install pyobjc using this command:
-```
-/usr/bin/python3 -m pip install --user pyobjc
-```
-
-If you are using MacPorts, pyobjc can be installed using this command:
-```
-sudo port install py38-pyobjc
-````
-
 If pyobjc has not been installed, you get an error about
 a missing Quartz import:
 
 ```
-./activity-agent install
-Traceback (most recent call last):
-  File "./activity-agent", line 5, in <module>
-    import Quartz  # Please install pyobjc
-ModuleNotFoundError: No module named 'Quartz'
+$ ./activity-agent install
+Please install pyobjc to use the Quartz module:
+/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m pip install --user pyobjc
+port install py39-pyobjc
+brew install pyobjc
 ```
+
+Use one of the three suggested commands, depending on whether you use
+the default Apple Python 3.x, MacPorts, or Homebrew.
+
 
 Installation
 ------------
 
 ```
-chmod a+x ./activity-monitor
-./activity-monitor install
+chmod a+x ./activity-agent
+./activity-agent install
 ```
 
-This asks launchctl to run activity-monitor once every 60 seconds.
-Check that log files start to appear in `~/.activity-monitor` within the
+This asks launchctl to run activity-agent once every 60 seconds.
+Check that log files start to appear in `~/.activity-agent` within the
 next minute.
 
-To uninstall, run `./activity-monitor uninstall`.
+To uninstall, run `./activity-agent uninstall`.
 
 
 Get logs
 --------
 
 ```
-./activity-monitor logs
+./activity-agent logs
 ...
 Sat Dec 05 2020 19:05:35  - Active
 Sat Dec 05 2020 19:27:07  - Locked
