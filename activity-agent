@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 QUARTZ_OK = True
@@ -33,33 +34,22 @@ def parse_datetime(dt_str: str) -> datetime.datetime:
     """Parses timestamps using the new ISO format, falling back to legacy formats."""
     dt = None
 
-    # 1. Try new ISO format with explicit offset
-    try:
-        dt = datetime.datetime.strptime(dt_str, NEW_DT_FMT)
-    except ValueError:
-        pass
-
-    # 2. Try Python built-in ISO parser
-    if dt is None:
+    for parse in (
+        lambda: datetime.datetime.strptime(dt_str, NEW_DT_FMT),
+        lambda: datetime.datetime.fromisoformat(dt_str),
+        lambda: datetime.datetime.strptime(dt_str, OLD_DT_FMT),
+    ):
         try:
-            dt = datetime.datetime.fromisoformat(dt_str)
+            dt = parse()
+            break
         except ValueError:
-            pass
+            continue
 
-    # 3. Try original full legacy format
-    if dt is None:
-        try:
-            dt = datetime.datetime.strptime(dt_str, OLD_DT_FMT)
-        except ValueError:
-            pass
-
-    # 4. Fallback for legacy format if %Z causes strptime failure
     if dt is None:
         parts = dt_str.split()
         if len(parts) >= 5:
-            dt_no_tz = " ".join(parts[:5])
             try:
-                dt = datetime.datetime.strptime(dt_no_tz, OLD_DT_FMT_NO_TZ)
+                dt = datetime.datetime.strptime(" ".join(parts[:5]), OLD_DT_FMT_NO_TZ)
             except ValueError:
                 pass
 
@@ -73,11 +63,11 @@ def parse_datetime(dt_str: str) -> datetime.datetime:
     return dt
 
 
+@dataclass(order=True)
 class State:
-    def __init__(self, start: datetime.datetime, end: datetime.datetime, state: str):
-        self.start = start
-        self.end = end
-        self.state = state
+    start: datetime.datetime
+    end: datetime.datetime
+    state: str
 
     def __str__(self) -> str:
         return f"{self.start.strftime('%Y-%m-%d %H:%M:%S')} - {self.state}"
@@ -87,13 +77,6 @@ class State:
 
     def __len__(self) -> int:
         return timeDiff(self.start, self.end)
-
-    def __lt__(self, other) -> bool:
-        if self.start != other.start:
-            return self.start < other.start
-        if self.end != other.end:
-            return self.end < other.end
-        return self.state < other.state
 
 
 def setupLogDir() -> Path:
@@ -335,16 +318,11 @@ def showLog(
     start = datetime.datetime.now().astimezone() - datetime.timedelta(days=days)
     start_fn = start.strftime(LOG_FN_FMT)
 
-    fns = []
+    lls = []
     for fn in sorted(glob.glob(gl)):
         sfn = os.path.basename(fn)
-        if sfn < start_fn:
-            continue
-        fns.append(Path(fn))
-
-    lls = []
-    for fn in fns:
-        lls.extend(readLog(fn))
+        if sfn >= start_fn:
+            lls.extend(readLog(Path(fn)))
 
     ll2 = []
     for ll in sorted(lls):
@@ -379,7 +357,7 @@ def main():
         dest="use_all_logs",
         default=True,
         action="store_false",
-        help="Do NOT use all available log files - only use for current client.",
+        help="Do NOT use all available log files - only use for current host.",
     )
     parser.add_argument(
         "-l",
@@ -394,7 +372,6 @@ def main():
         "-d",
         "--days",
         metavar="DAYS",
-        dest="days",
         type=int,
         default=14,
         help="Look at logs at most DAYS days old. Default: 14",
@@ -402,13 +379,11 @@ def main():
     parser.add_argument(
         "-j",
         "--json",
-        dest="json",
         action="store_true",
         help="Output data as machine readable JSON",
     )
     parser.add_argument(
         "--lockedoff",
-        dest="lockedoff",
         action="store_true",
         help="Distinguish between off and locked state",
     )
