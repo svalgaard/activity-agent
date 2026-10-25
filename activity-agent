@@ -79,11 +79,9 @@ class State:
         return timeDiff(self.start, self.end)
 
 
-def setupLogDir() -> Path:
-    hostname = socket.gethostname().split(".")[0]
-    if hostname:
-        return Path.home() / f".{ME}" / f"logs-{hostname}"
-    return ROOT_LOG_DN
+def get_default_log_dir() -> Path:
+    hostname = socket.gethostname().split(".")[0] or "unknown"
+    return Path.home() / f".{ME}" / f"logs-{hostname}"
 
 
 def get_servicepath() -> Path:
@@ -348,7 +346,7 @@ def showLog(
 
 
 def main():
-    default_log_dir = setupLogDir()
+    default_log_dir = get_default_log_dir()
 
     parser = argparse.ArgumentParser(description="Activity Agent for macOS")
     parser.add_argument(
